@@ -1,35 +1,82 @@
 import torch
 from zo_trainer import OurTrainer
 from transformers import TrainingArguments
+from dataclasses import dataclass
 
-
+@dataclass
 class ZOTrainingArguments(TrainingArguments):
-    def __init__(self):
-        self.output_dir = "./tmp"
-        self.do_train = False
-        self.do_eval = False
-        self.per_device_train_batch_size = 1
-        self.evaluation_strategy = "no"
-        self.save_strategy = "no"
-        self.load_best_model_at_end = False
-        self.lr_scheduler_type = "constant"
-        self.logging_steps = 10
-        self.num_train_epochs = 5
-        self.learning_rate = 1e-3
-        self.weight_decay = 0.0
-        self.fp16 = False
-        self.seed = 42
-        self.full_determinism = False
-        self.skip_memory_metrics = True
+    output_dir: str="tmp/"
+    task_name: str = "3dgs"
+    num_train: int = 0
+    num_dev: int = None
+    num_eval: int = None
+    num_train_sets: int = None
+    train_set_seed: int = 0
+    result_file: str = None
 
-        # Zero-order 特有参数
-        self.zo_eps = 1e-3
-        self.q = 1
-        self.trainer = "zo_adam"  # "zo_sgd", "zo_sign_opt" 也可以
-        self.perturbation_mode = "two_side"
-        self.gradient_accumulation_steps = 1
-        self.module_wise_perturbation = False
-        self.report_to=["all"]
+    model_name: str = "3dgs"
+    load_float16: bool = False
+    load_bfloat16: bool = False
+    load_int8: bool = False
+    max_length: int = 2048
+    no_auto_device: bool = False
+
+    sfc: bool = False
+    icl_sfc: bool = False
+    template_ver: int = 0
+
+    trainer: str = "zo_sgd"
+    optimizer: str = "adam"
+    only_train_option: bool = True
+    train_as_classification: bool = False
+    momentum: float = 0.0
+
+    zo_eps: float = 1e-3
+    perturbation_mode: str = "two_side"
+    q: int = 1
+
+    prefix_tuning: bool = False
+    num_prefix: int = 5
+    no_reparam: bool = True
+    prefix_init_by_real_act: bool = True
+
+    prompt_tuning: bool = False
+    num_virtual_tokens: int = 10
+    prompt_init_by_real_tokens: bool = False
+
+    lora: bool = False
+    lora_alpha: int = 16
+    lora_r: int = 8
+
+    sampling: bool = False
+    temperature: float = 1.0
+    num_beams: int = 1
+    top_k: int = None
+    top_p: float = 0.95
+    max_new_tokens: int = 50
+    eos_token: str = "\n"
+
+    save_model: bool = False
+    no_eval: bool = False
+    tag: str = ""
+
+    linear_probing: bool = False
+    lp_early_stopping: bool = False
+    head_tuning: bool = False
+    untie_emb: bool = False
+    verbose: bool = False
+    non_diff: bool = False
+    save_on_interrupt: bool = False
+    clean_model_at_end: bool = True
+
+    gradient_sparsity: float = None
+    sparse_gradient_resample_steps: int = 1
+    sparse_gradient_group: str = "layer"
+
+    module_wise_perturbation: bool = False
+    perturbed_module_level: str = "transformer-block"
+    coordinate_perturbation: bool = True
+    report_to: list = None
 
 class ZOWrapper:
     def __init__(self, model):

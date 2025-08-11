@@ -27,7 +27,7 @@ try:
 except:
     pass
 
-class GaussianModel(torch.nn.Module):
+class GaussianModel:
 
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
@@ -64,7 +64,6 @@ class GaussianModel(torch.nn.Module):
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
-        super().__init__()
 
     def capture(self):
         return (
@@ -472,6 +471,3 @@ class GaussianModel(torch.nn.Module):
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
-    
-    def forward(self):
-        return None
