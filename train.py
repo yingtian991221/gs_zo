@@ -115,61 +115,213 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
+        # render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        # image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
+        # if viewpoint_cam.alpha_mask is not None:
+        #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        #     image *= alpha_mask
+
+        # # Loss
+        # gt_image = viewpoint_cam.original_image.cuda()
+        # Ll1 = l1_loss(image, gt_image)
+        # if FUSED_SSIM_AVAILABLE:
+        #     ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+        # else:
+        #     ssim_value = ssim(image, gt_image)
+
+        # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # # Depth regularization
+        # Ll1depth_pure = 0.0
+        # if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+        #     invDepth = render_pkg["depth"]
+        #     mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+        #     depth_mask = viewpoint_cam.depth_mask.cuda()
+
+        #     Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+        #     Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+        #     loss += Ll1depth
+        #     Ll1depth = Ll1depth.item()
+        # else:
+        #     Ll1depth = 0
+
+        # loss.backward()
+        zo_params = [
+            "_xyz",
+            "_features_dc",
+            "_features_rest",
+            "_scaling",
+            "_rotation",
+            "_opacity",
+            "_exposure"
+        ]
+        # PERTURB XYZ
+        orig_xyz = gaussians._xyz.data.clone()
+        perturb=torch.randn_like(orig_xyz)*1e-4
+
+        gaussians._xyz.data=orig_xyz+perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        image = render_pkg["render"]
 
         if viewpoint_cam.alpha_mask is not None:
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        if FUSED_SSIM_AVAILABLE:
-            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        else:
-            ssim_value = ssim(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        # Depth regularization
-        Ll1depth_pure = 0.0
-        if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-            invDepth = render_pkg["depth"]
-            mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-            depth_mask = viewpoint_cam.depth_mask.cuda()
+        gaussians._xyz.data=orig_xyz-perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
 
-            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
-            Ll1depth = Ll1depth.item()
-        else:
-            Ll1depth = 0
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
 
-        # loss.backward()
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
 
-        inputs = {
-            "prediction": image,
-            "target": gt_image
-        }
-        zo.zo_step(inputs)
-        zo.update()
+        loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        grad=(loss1-loss2)/(2*1e-4)
+
+        gaussians._xyz.data-=0.0001*grad*perturb
+
+        # PERTURB ROTATION
+        orig_scaling = gaussians._scaling.data.clone()
+        perturb=torch.randn_like(orig_scaling)*1e-4
+
+        gaussians._scaling.data=orig_scaling+perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
+
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        gaussians._scaling.data=orig_scaling-perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
+
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        grad=(loss1-loss2)/(2*4)
+
+        gaussians._scaling.data-=0.0001*grad*perturb
+
+        # PERTURB XYZ
+        orig_rotation = gaussians._rotation.data.clone()
+        perturb=torch.randn_like(orig_rotation)*1e-4
+
+        gaussians._rotation.data=orig_rotation+perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
+
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        gaussians._rotation.data=orig_rotation-perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
+
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        grad=(loss1-loss2)/(2*1e-4)
+
+        gaussians._rotation.data-=0.0001*grad*perturb
+
+        # PERTURB OPACITY
+        orig_opacity = gaussians._opacity.data.clone()
+        perturb=torch.randn_like(orig_opacity)*1e-4
+
+        gaussians._opacity.data=orig_opacity+perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
+
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        gaussians._opacity.data=orig_opacity-perturb
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        image = render_pkg["render"]
+
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
+        ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        grad=(loss1-loss2)/(2*1e-5)
+
+        gaussians._opacity.data-=0.0001*grad*perturb
 
         iter_end.record()
 
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+            ema_loss_for_log = 0.4 * loss1.item() + 0.6 * ema_loss_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            training_report(tb_writer, iteration, Ll1, loss1, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -263,7 +415,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -275,10 +426,10 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000])
-    # parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    # parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    # parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000])
+    # parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
