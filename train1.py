@@ -15,14 +15,17 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
-from scene import Scene
-from scene.gaussian_model_bak import GaussianModel
+from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+
+# from zo_trainer import OurTrainer
+from zo_wrapper import ZOWrapper
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -41,8 +44,22 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def compute_loss(view_cam, gaussians, pipe, bg, opt, dataset):
+    render_pkg = render(view_cam, gaussians, pipe, bg,
+                        use_trained_exp=dataset.train_test_exp,
+                        separate_sh=SPARSE_ADAM_AVAILABLE)
+    image = render_pkg["render"]
+    if view_cam.alpha_mask is not None:
+        image *= view_cam.alpha_mask.cuda()
+    gt = view_cam.original_image.cuda()
+    Ll1 = l1_loss(image, gt)
+    ssim_value = fused_ssim(image.unsqueeze(0), gt.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt)
+    return Ll1, (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value), render_pkg["radii"]
 
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    eps=1e-3
+    lr=1e-1
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
@@ -50,6 +67,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
+
+    zo = ZOWrapper(gaussians)
+
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -68,6 +88,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -88,7 +109,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 network_gui.conn = None
 
         iter_start.record()
-
+        
         gaussians.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
@@ -106,93 +127,143 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
+        
+        zo_params = [
+            "_xyz",
+            "_features_dc",
+            "_features_rest",
+            "_scaling",
+            "_rotation",
+            "_opacity",
+        ]
+        fixed_bg = background
 
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        gaussians.optimizer.zero_grad(set_to_none=True)
 
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            image *= alpha_mask
+        # 用“干净的”前向，和训练时一致但不做扰动
+        Ll1_auto, loss_auto, _ = compute_loss(viewpoint_cam, gaussians, pipe, fixed_bg, opt, dataset)
+        loss_auto.backward()  # 标准反传，所有需要 grad 的参数都会有 .grad
 
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        if FUSED_SSIM_AVAILABLE:
-            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+        # 收集关心的张量梯度
+        params_to_check = {
+            "_xyz":       getattr(gaussians, "_xyz", None),
+            "_scaling":   getattr(gaussians, "_scaling", None),
+            "_rotation":  getattr(gaussians, "_rotation", None),
+            "_opacity":   getattr(gaussians, "_opacity", None),
+            "_features_dc":   getattr(gaussians, "_features_dc", None),
+            "_features_rest": getattr(gaussians, "_features_rest", None),
+        }
+        auto_grads = {n: (t.grad.clone() if (t is not None and t.grad is not None) else None)
+                    for n,t in params_to_check.items()}
+
+        # 清掉 autograd 的梯度，避免影响后面的 ZO
+        gaussians.optimizer.zero_grad(set_to_none=True)
+
+
+        # 2) 生成每个参数张量自己的 z，并做 +eps 渲染
+        torch.manual_seed(torch.randint(0, 1_000_000_000, (1,)).item())
+        seed = torch.initial_seed()
+        if iteration<1000:
+            param_names=["_xyz"]
         else:
-            ssim_value = ssim(image, gt_image)
+            param_names = ["_xyz","_scaling","_rotation","_opacity","_features_dc","_features_rest"]  # 按需取舍
+        tensors = {n: getattr(gaussians, n) for n in param_names if hasattr(gaussians, n)}
+        orig = {n: t.data.clone() for n, t in tensors.items()}
+        z    = {n: torch.randn_like(t) for n, t in tensors.items()}
+        
+        # +eps
+        with torch.no_grad():
+            for n,t in tensors.items():
+                t.add_(eps * z[n])
+        Ll1, loss1, radii = compute_loss(viewpoint_cam, gaussians, pipe, fixed_bg, opt, dataset)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        # -eps（从 +eps 直接减 2eps）
+        with torch.no_grad():
+            for n,t in tensors.items():
+                t.add_(-2*eps * z[n])
+        _,loss2,_ = compute_loss(viewpoint_cam, gaussians, pipe, fixed_bg, opt, dataset)
 
-        # Depth regularization
-        Ll1depth_pure = 0.0
-        if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-            invDepth = render_pkg["depth"]
-            mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-            depth_mask = viewpoint_cam.depth_mask.cuda()
+        # 复原
+        with torch.no_grad():
+            for n,t in tensors.items():
+                t.copy_(orig[n])
 
-            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
-            Ll1depth = Ll1depth.item()
-        else:
-            Ll1depth = 0
+        # 方向导数（标量）
+        g_scalar = (loss1 - loss2) / (2*eps)
 
-        loss.backward()
+        zo_grads = {n: g_scalar * z[n] for n in tensors}  # 每张量的 ZO 伪梯度
 
+        # 3) 逐张量做对比：范数 & 余弦相似度
+        def flat(x): return x.reshape(1, -1)
+        report_lines = []
+        for n in tensors.keys():
+            g_auto = auto_grads.get(n, None)
+            g_zo   = zo_grads.get(n, None)
+            if g_auto is None or g_zo is None: 
+                continue
+            # 为避免极端值影响，建议在计算相似度前把很小的值过滤或加个 eps
+            auto_norm = g_auto.norm().item()
+            zo_norm   = g_zo.norm().item()
+            # 余弦相似度（加一个很小的 eps 防 NaN）
+            cos = torch.nn.functional.cosine_similarity(
+                flat(g_auto), flat(g_zo), dim=1, eps=1e-12
+            ).item()
+            report_lines.append(f"{n:14s}  ||g_auto||={auto_norm:.3e}  ||g_zo||={zo_norm:.3e}  cos={cos:.4f}")
+
+        print("\n[GradCompare @ iter {:d}] loss_auto={:.6f}".format(iteration, loss_auto.item()))
+        for l in report_lines: print("  " + l)
+
+        # 3) 把“标量 × 各自的 z”作为伪梯度，逐张量 step（省显存）
+        for n,t in tensors.items():
+            # 重新用同一seed确保和上面一致（可选；这里我们直接用缓存的 z）
+            pseudo_grad = g_scalar * z[n]*0.001
+            t.grad = pseudo_grad
+            gaussians.optimizer.step()              # 利用原来 per-group 的学习率
+            t.grad = None
+
+        # 如果有 rotation，记得单位化
+        if "_rotation" in tensors:
+            with torch.no_grad():
+                r = getattr(gaussians, "_rotation")
+                r.copy_(r / (r.norm(dim=-1, keepdim=True).clamp_min(1e-8)))
+    
         iter_end.record()
 
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+            ema_loss_for_log = 0.4 * loss1.item() + 0.6 * ema_loss_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-
-            # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
-
-            if iteration %100==0:
+            if iteration %2000==0:
                 print("XYZ :", gaussians._xyz)
                 print("Scaling shape:", gaussians._scaling.shape)
                 print("Rotation shape:", gaussians._rotation.shape)
                 print("Opacity shape:", gaussians._opacity.shape)
+            # test_iter
+            # Log and save
+            training_report(tb_writer, iteration, Ll1, loss1, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            if (iteration in saving_iterations):
+                scene.save(iteration)
+
             # Densification
-            if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+            # if iteration < opt.densify_until_iter:
+            #     # Keep track of max radii in image-space for pruning
+               
+            #     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+            #         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+            #         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+            #     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+            #         gaussians.reset_opacity()
 
-            # Optimizer step
-            if iteration < opt.iterations:
-                gaussians.exposure_optimizer.step()
-                gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                if use_sparse_adam:
-                    visible = radii > 0
-                    gaussians.optimizer.step(visible, radii.shape[0])
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                else:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
+
 
             if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
@@ -224,7 +295,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
     # Report test and samples of training set
-    if iteration in testing_iterations:
+    # if iteration in testing_iterations:
+    if iteration % 1000==0:
         torch.cuda.empty_cache()
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
@@ -255,7 +327,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
-        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -269,7 +340,7 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     # parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000])
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000])
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1, 1000,3000,5000,7000,12000,15000,20000,25000,30000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)

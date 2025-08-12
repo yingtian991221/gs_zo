@@ -45,7 +45,8 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
-
+    eps=1e-3
+    lr=1e-1
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
@@ -74,6 +75,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -112,41 +114,56 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
+        
 
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # if iteration<1000:
+        #     bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        # render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        # image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        #     render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        #     image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
-        # if viewpoint_cam.alpha_mask is not None:
-        #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
-        #     image *= alpha_mask
+        #     if viewpoint_cam.alpha_mask is not None:
+        #         alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        #         image *= alpha_mask
 
-        # # Loss
-        # gt_image = viewpoint_cam.original_image.cuda()
-        # Ll1 = l1_loss(image, gt_image)
-        # if FUSED_SSIM_AVAILABLE:
-        #     ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        # else:
-        #     ssim_value = ssim(image, gt_image)
+        #     # Loss
+        #     gt_image = viewpoint_cam.original_image.cuda()
+        #     Ll1 = l1_loss(image, gt_image)
+        #     if FUSED_SSIM_AVAILABLE:
+        #         ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+        #     else:
+        #         ssim_value = ssim(image, gt_image)
 
-        # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        #     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        # # Depth regularization
-        # Ll1depth_pure = 0.0
-        # if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-        #     invDepth = render_pkg["depth"]
-        #     mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-        #     depth_mask = viewpoint_cam.depth_mask.cuda()
+        #     # Depth regularization
+        #     Ll1depth_pure = 0.0
+        #     if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+        #         invDepth = render_pkg["depth"]
+        #         mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+        #         depth_mask = viewpoint_cam.depth_mask.cuda()
 
-        #     Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-        #     Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-        #     loss += Ll1depth
-        #     Ll1depth = Ll1depth.item()
-        # else:
-        #     Ll1depth = 0
+        #         Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+        #         Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+        #         loss += Ll1depth
+        #         Ll1depth = Ll1depth.item()
+        #     else:
+        #         Ll1depth = 0
 
-        # loss.backward()
+        #     loss.backward()
+
+            
+        #         gaussians.exposure_optimizer.step()
+        #         gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+        #         if use_sparse_adam:
+        #             visible = radii > 0
+        #             gaussians.optimizer.step(visible, radii.shape[0])
+        #             gaussians.optimizer.zero_grad(set_to_none = True)
+        #         else:
+        #             gaussians.optimizer.step()
+        #             gaussians.optimizer.zero_grad(set_to_none = True)
+
+        # if iteration>1000:
         zo_params = [
             "_xyz",
             "_features_dc",
@@ -154,11 +171,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             "_scaling",
             "_rotation",
             "_opacity",
-            "_exposure"
         ]
         # PERTURB XYZ
         orig_xyz = gaussians._xyz.data.clone()
-        perturb=torch.randn_like(orig_xyz)*1e-4
+        perturb=torch.randn_like(orig_xyz)*eps
 
         gaussians._xyz.data=orig_xyz+perturb
         bg = torch.rand((3), device="cuda") if opt.random_background else background
@@ -176,7 +192,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         gaussians._xyz.data=orig_xyz-perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -184,22 +199,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
 
         loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        grad=(loss1-loss2)/(2*1e-4)
+        grad=(loss1-loss2)/(2*eps)
+        
+        gaussians._xyz.data=orig_xyz-opt.position_lr_init*grad
 
-        gaussians._xyz.data-=0.0001*grad*perturb
-
-        # PERTURB ROTATION
+        # PERTURB SCALING
         orig_scaling = gaussians._scaling.data.clone()
-        perturb=torch.randn_like(orig_scaling)*1e-4
+        perturb=torch.randn_like(orig_scaling)*eps
 
         gaussians._scaling.data=orig_scaling+perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -214,7 +228,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         gaussians._scaling.data=orig_scaling-perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -222,22 +236,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        gt_image = viewpoint_cam.original_image.cuda()
+        # gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
 
         loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        grad=(loss1-loss2)/(2*4)
+        grad=(loss1-loss2)/(2*eps)
 
-        gaussians._scaling.data-=0.0001*grad*perturb
+        gaussians._scaling.data=orig_scaling-opt.scaling_lr*grad
 
-        # PERTURB XYZ
+        # PERTURB ROTATION
         orig_rotation = gaussians._rotation.data.clone()
-        perturb=torch.randn_like(orig_rotation)*1e-4
+        perturb=torch.randn_like(orig_rotation)*eps
 
         gaussians._rotation.data=orig_rotation+perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -252,7 +266,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         gaussians._rotation.data=orig_rotation-perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -260,22 +274,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        gt_image = viewpoint_cam.original_image.cuda()
+        # gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
 
         loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        grad=(loss1-loss2)/(2*1e-4)
+        grad=(loss1-loss2)/(2*eps)
 
-        gaussians._rotation.data-=0.0001*grad*perturb
+        gaussians._rotation.data=orig_rotation-opt.rotation_lr*grad
 
         # PERTURB OPACITY
         orig_opacity = gaussians._opacity.data.clone()
-        perturb=torch.randn_like(orig_opacity)*1e-4
+        perturb=torch.randn_like(orig_opacity)*eps
 
         gaussians._opacity.data=orig_opacity+perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -290,7 +304,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         gaussians._opacity.data=orig_opacity-perturb
-        bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # bg = torch.rand((3), device="cuda") if opt.random_background else background
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         image = render_pkg["render"]
 
@@ -298,15 +312,91 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        gt_image = viewpoint_cam.original_image.cuda()
+        # gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
 
         loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        grad=(loss1-loss2)/(2*1e-5)
+        grad=(loss1-loss2)/(2*eps)
 
-        gaussians._opacity.data-=0.0001*grad*perturb
+        gaussians._opacity.data=orig_opacity-opt.opacity_lr*grad
+
+        # # PERTURB _features_dc
+        # orig_features_dc = gaussians._features_dc.data.clone()
+        # perturb=torch.randn_like(orig_features_dc)*eps
+
+        # gaussians._features_dc.data=orig_features_dc+perturb
+        # # bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        # image = render_pkg["render"]
+
+        # if viewpoint_cam.alpha_mask is not None:
+        #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        #     image *= alpha_mask
+
+        # gt_image = viewpoint_cam.original_image.cuda()
+        # Ll1 = l1_loss(image, gt_image)
+        # ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        # loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # gaussians._features_dc.data=orig_features_dc-perturb
+        # # bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        # image = render_pkg["render"]
+
+        # if viewpoint_cam.alpha_mask is not None:
+        #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        #     image *= alpha_mask
+
+        # # gt_image = viewpoint_cam.original_image.cuda()
+        # Ll1 = l1_loss(image, gt_image)
+        # ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        # loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # grad=(loss1-loss2)/(2*eps)
+
+        # gaussians._features_dc.data=orig_features_dc-opt.feature_lr*grad*perturb
+
+        # # PERTURB _features_rest
+        # orig_features_rest = gaussians._features_rest.data.clone()
+        # perturb=torch.randn_like(orig_features_rest)*eps
+
+        # gaussians._features_rest.data=orig_features_rest+perturb
+        # # bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        # image = render_pkg["render"]
+
+        # if viewpoint_cam.alpha_mask is not None:
+        #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        #     image *= alpha_mask
+
+        # gt_image = viewpoint_cam.original_image.cuda()
+        # Ll1 = l1_loss(image, gt_image)
+        # ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        # loss1 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # gaussians._features_rest.data=orig_features_rest-perturb
+        # # bg = torch.rand((3), device="cuda") if opt.random_background else background
+        # render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+        # image = render_pkg["render"]
+
+        # if viewpoint_cam.alpha_mask is not None:
+        #     alpha_mask = viewpoint_cam.alpha_mask.cuda()
+        #     image *= alpha_mask
+
+        # # gt_image = viewpoint_cam.original_image.cuda()
+        # Ll1 = l1_loss(image, gt_image)
+        # ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0)) if FUSED_SSIM_AVAILABLE else ssim(image, gt_image)
+
+        # loss2 = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+
+        # grad=(loss1-loss2)/(2*eps)
+
+        # gaussians._features_rest.data=orig_features_dc-opt.feature_lr*grad*perturb
 
         iter_end.record()
 
@@ -319,23 +409,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
-
+            if iteration %100==0:
+                print("XYZ :", gaussians._xyz)
+            # print("Scaling shape:", gaussians._scaling.shape)
+            # print("Rotation shape:", gaussians._rotation.shape)
+            # print("Opacity shape:", gaussians._opacity.shape)
+            # test_iter
             # Log and save
             training_report(tb_writer, iteration, Ll1, loss1, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # # Densification
-            # if iteration < opt.densify_until_iter:
-            #     # Keep track of max radii in image-space for pruning
+            # Densification
+            if iteration < opt.densify_until_iter:
+                # Keep track of max radii in image-space for pruning
                
-            #     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-            #         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-            #         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+                # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                #     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                #     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
                 
-            #     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-            #         gaussians.reset_opacity()
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    gaussians.reset_opacity()
 
             # # Optimizer step
             # if iteration < opt.iterations:
@@ -352,7 +446,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             #         gaussians.optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
@@ -428,7 +521,7 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     # parser.add_argument("--test_iterations", nargs="+", type=int, default=[5_000])
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[5_000])
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1, 1000,3000,5000,7000,12000,15000,20000,25000,30000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument('--disable_viewer', action='store_true', default=False)
